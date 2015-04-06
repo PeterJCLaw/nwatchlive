@@ -13,7 +13,6 @@
             };
         }
 
-        var es = new EventSource('stream');
         var markError = function(row) {
             var setError = function() {
                 if (row.className == 'errorf')
@@ -62,41 +61,100 @@
             }
         };
 
-        var pingHandle;
+        var RELOAD_DELAY = 100;
+        var killHandle;
+        var errorHandle;
+        var es = new EventSource('stream');
 
-        es.onmessage = function(evt) {
-            var dat = JSON.parse(evt.data);
-
-            console.log("Got message:");
-            console.dir(dat);
-
-            receiveData({'Monitor': null});
-
-            if ('ping' in dat) {
-                if (pingHandle) {
-                    clearTimeout(pingHandle);
-                    pingHandle = null;
-                }
-                var interval = dat.ping;
-                var timeToError = interval * 2.5;
-                pingHandle = setTimeout(function() {
-                    var msg = "No pings for " + interval + " seconds.";
-                    receiveData({'Monitor': msg});
-                }, timeToError * 1000);
+        var reloadStream = function(reason) {
+            console.log("About to reload stream (" + reason + ")");
+            // Clear any kill handles if there are any -- we don't want
+            // to double-kill the stream
+            if (killHandle) {
+                clearTimeout(killHandle);
+                killHandle = null;
             }
 
-            var statuses = dat.statuses;
-            receiveData(statuses);
+            // grab the url from the stream so we can re-create it
+            var url = es.url;
+            es.close();
+
+            // reload the stream after a short delay, gives the system
+            // time to settle if needed.
+            setTimeout(function() {
+                console.log("Creating replacement stream with url: '" + url + "'.");
+                es = new EventSource(url);
+                connectToStream(es);
+            }, RELOAD_DELAY);
         };
-        es.onerror = function(err) {
-            console.log('stream error:');
-            console.dir(err);
-            receiveData({'Monitor': 'offline'});
+
+        var delayKill = function(howLongSeconds) {
+            if (killHandle) {
+                clearTimeout(killHandle);
+            }
+            console.log("Setting up stream reload in " + howLongSeconds + " seconds (if no pings before then).");
+            killHandle = setTimeout(function() {
+                var msg = 'No pings for ' + howLongSeconds + ' seconds.'
+                receiveData({'Monitor': msg});
+                reloadStream(msg);
+            }, howLongSeconds * 1000);
         };
-        es.onopen = function() {
-            console.log('stream open.');
-            receiveData({'Monitor': null});
+
+        var connectToStream = function(es) {
+            es.onmessage = function(evt) {
+                var dat = JSON.parse(evt.data);
+
+                console.log("Got message:");
+                console.dir(dat);
+
+                receiveData({'Monitor': null});
+
+                if ('ping' in dat) {
+                    var interval = dat.ping;
+                    var timeToError = interval * 2.5;
+                    delayKill(timeToError);
+                    return;
+                }
+
+                var statuses = dat.statuses;
+                receiveData(statuses);
+            };
+            es.onerror = function(err) {
+                console.log('stream error:');
+                console.dir(err);
+
+                // If there isn't an error marker pending, set on up.
+                // It will only fire if the stream doesn't reload in time.
+                if (!errorHandle) {
+                    errorHandle = setTimeout(function() {
+                        // Clear the handle (which we're acting as) so
+                        // others can be set up if needed
+                        if (errorHandle) {
+                            clearTimeout(errorHandle);
+                            errorHandle = null;
+                        }
+
+                        receiveData({'Monitor': 'offline'});
+                    }, RELOAD_DELAY * 2);
+                }
+
+                // Reload the stream. When the stream reloads
+                reloadStream(err);
+            };
+            es.onopen = function() {
+                console.log('stream open.');
+
+                // If there's an error handle pending then clear it --
+                // the stream is back up now and we don't really care.
+                if (errorHandle) {
+                    clearTimeout(errorHandle);
+                    errorHandle = null;
+                }
+
+                receiveData({'Monitor': null});
+            };
         };
+        connectToStream(es);
     </script>
   </head>
   <body>
